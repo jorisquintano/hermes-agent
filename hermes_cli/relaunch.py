@@ -4,11 +4,16 @@ across process replacement so ``hermes sessions browse`` / post-setup relaunch k
 import os
 import shutil
 import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
 from hermes_cli._parser import (
     PRE_ARGPARSE_INHERITED_FLAGS, build_top_level_parser
 )
+
+# The checkout this module lives in. Anything under it (notably the repo's own ``hermes``
+# script) is a launch-context artifact, never a durable installed launcher.
+_CHECKOUT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _build_inherited_flag_table() -> list[tuple[str, bool]]:
@@ -58,6 +63,28 @@ def _extract_inherited_flags(argv: Sequence[str]) -> list[str]:
     return flags
 
 
+def _is_checkout_internal(candidate: str) -> bool:
+    """Whether *candidate* ships in this checkout rather than being an installed launcher.
+
+    The installer's ``hermes`` shim execs ``<venv>/bin/python <checkout>/hermes``, so anything
+    relaunched through the ``hermes`` command sees the repo script as ``argv[0]``. Re-exec'ing
+    THAT leans on its ``#!/usr/bin/env python3`` shebang — the system interpreter, which has
+    none of the venv's dependencies — so ``/update`` and ``hermes sessions browse`` died with
+    ``ModuleNotFoundError: No module named 'dotenv'`` before their first third-party import.
+    Skipping the candidate lets PATH (the shim) win, and ``build_relaunch_argv`` still falls
+    back to ``<sys.executable> -m hermes_cli.main``. Same rule as
+    ``linux_desktop_entry._inside_checkout`` (#90292).
+    """
+    if not candidate:
+        return False
+    try:
+        path = Path(candidate).resolve()
+        roots = {_CHECKOUT_ROOT, _CHECKOUT_ROOT.resolve()}
+    except OSError:
+        return False
+    return any(root == path or root in path.parents for root in roots)
+
+
 def resolve_hermes_bin() -> Optional[str]:
     """Hermes entry point: ``sys.argv[0]`` if a real executable, else ``which hermes``, else ``None``
     (caller falls back to ``python -m hermes_cli.main``)."""
@@ -71,11 +98,16 @@ def resolve_hermes_bin() -> Optional[str]:
     if (
         os.path.isabs(argv0) and os.path.isfile(argv0) and os.access(argv0, os.X_OK)
         and not (_is_windows and _is_python_script(argv0))
+        and not _is_checkout_internal(argv0)
     ):
         return argv0
     if not argv0.startswith("-") and os.path.isfile(argv0):
         abs_path = os.path.abspath(argv0)
-        if os.access(abs_path, os.X_OK) and not (_is_windows and _is_python_script(abs_path)):
+        if (
+            os.access(abs_path, os.X_OK)
+            and not (_is_windows and _is_python_script(abs_path))
+            and not _is_checkout_internal(abs_path)
+        ):
             return abs_path
     return shutil.which("hermes") or None
 

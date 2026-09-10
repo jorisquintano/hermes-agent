@@ -32,6 +32,32 @@ class TestResolveHermesBin:
         )
         assert relaunch_mod.resolve_hermes_bin() == "/usr/bin/hermes"
 
+    @pytest.mark.linux_only
+    def test_rejects_checkout_internal_argv0_for_path_launcher(self, monkeypatch, tmp_path):
+        """A launcher INSIDE this checkout is a launch-context artifact, never a durable
+        entry point. install.sh's shim execs ``<venv>/bin/python <checkout>/hermes``, so
+        every relaunch carries that repo script as argv[0]; re-exec'ing it resolves its
+        ``#!/usr/bin/env python3`` shebang to the SYSTEM interpreter, which lacks the venv
+        deps — /update and `hermes sessions browse` then die on the first third-party
+        import (``No module named 'dotenv'``). Reject it so the PATH launcher wins; the
+        ``sys.executable -m hermes_cli.main`` fallback still covers a checkout with no
+        launcher on PATH. Mirrors ``linux_desktop_entry._inside_checkout``."""
+        checkout = tmp_path / "hermes-agent"
+        (checkout / "hermes_cli").mkdir(parents=True)
+        repo_script = checkout / "hermes"
+        repo_script.write_text("#!/usr/bin/env python3\n")
+        repo_script.chmod(0o755)
+        # Rebase the module's own checkout root onto the fixture tree.
+        monkeypatch.setattr(relaunch_mod, "_CHECKOUT_ROOT", checkout)
+        assert repo_script.is_file()
+        monkeypatch.setattr(sys, "argv", [str(repo_script), "update"])
+        # PATH never carries the repo script for a real install — only the shim.
+        monkeypatch.setattr(
+            relaunch_mod.shutil, "which",
+            lambda name: "/home/user/.local/bin/hermes" if name == "hermes" else None,
+        )
+        assert relaunch_mod.resolve_hermes_bin() == "/home/user/.local/bin/hermes"
+
 
 class TestExtractInheritedFlags:
     def test_extracts_tui_and_dev(self):
